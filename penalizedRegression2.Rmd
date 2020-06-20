@@ -1,0 +1,364 @@
+---
+title: "Assessment of Regression Methods for Predictions"
+author: "Marc Petta"
+date: ""
+output:
+  html_document:
+    df_print: paged
+---
+Penalized regerssioin methods are assessed here to determine best fit for data on atmsopheric conditions. Initial data preprocessing was conducted to deal with missing values and colinearity. Alternative methods were then considered. Penalized regression methods of Ridge Regression, Elastic Net, and LASSO were assessed and cross validated to tune lamda values. A bootstrap comparison to confirm reduction in variability of estimates of standard deviations follows. A final cross validated assessment of the assessment process concludes the script.
+```{r, message=FALSE, warning=FALSE}
+# set up
+library(dplyr)
+library(naniar)
+library(car)
+library(leaps)
+library(glmnet)
+library(boot)
+library(GGally)
+
+# read in dataset
+air=read.csv("data/2015_Air_quality_in_northern_Taiwan.csv", header = T, sep = ",")
+#Subset to location of interest
+air <- air[ which(air$station=='Zhongshan'), ]
+# function to cast all variables as numeric
+air <- mutate_all(air, function(x) as.numeric(as.character(x)))
+
+```
+
+#### Explore missing values
+```{r, message=FALSE, warning=FALSE}
+# missingness across AMB_TEMP
+gg_miss_fct(x = air, fct = AMB_TEMP)
+
+```
+
+A large amount of missing values exists in the dataframe. Entire columns are problematic and will need to be removed.
+```{r}
+# remove variables with excessivec missing values and those used to create others
+air= air[,-c(1,2,11,14,15,19)]
+# # clean up some of the remaining NAs
+air = air[complete.cases(air), ]
+# review data
+#summary(air)
+
+```
+
+There are several nitrogen based compounds. Althoug the penalized regression methods used here are robust to some colinearity, these correlated variables are so closely related they will be removed. 
+
+```{r}
+# get subset for nitrogen
+nobase = air[5:7]
+# Check correlations (as scatterplots), distribution and print corrleation coefficient 
+ggpairs(nobase, title="correlogram for nitrogen compounds") 
+
+```
+
+```{r}
+# remove variables with high VIF values
+air = air[,-c(6,7)]
+# review
+summary(air)
+
+```
+
+Sulfur dioxide has been the parameter identified as being associated with poor air quality. In order to predict conditions for poor air quality modeling will be performed using regression. Threshold for air quality referenced here: https://www.airnow.gov/index.cfm?action=airnow.main 
+
+
+### Model Selection
+##### Alternative method assessment of Ridge, LASSO, and Elastic Net regression
+Penalized regression models are assessed for model selection followed by cross validation on the model selection to tune lamda values.
+
+```{r, message=FALSE, warning=FALSE, results='hide', fig.show='hide'}
+# select best model from penalized regression 
+# fit models
+x = model.matrix(SO2~.,data=air)
+y = air[,10]
+p = dim(x)[2]
+
+# fit response on all predictors, using multiple regression
+REGfit = lm(y~x)
+#summary(REGfit)
+
+# cross-validation
+set.seed(1)
+n = 7691
+ncv = 10
+groups=c(rep(1:ncv,floor(n/ncv)),(1:(n-ncv*floor(n/ncv)))); cvgroups = sample(groups,n)
+
+lambdalist = exp((1200:-1200)/100)  # order large to small
+
+# Ridge Regression cross-validation
+cvRRglm = cv.glmnet(x, y, lambda=lambdalist, alpha = 0, nfolds=ncv, foldid=cvgroups)
+invisible(plot(cvRRglm$lambda,cvRRglm$cvm,type="l",lwd=2,col="red",xlab="lambda",ylab="CV(10)",
+     xlim=c(0,10), ylim = c(5,8) ))
+whichlowestcvRR = order(cvRRglm$cvm)[1]; min(cvRRglm$cvm)
+bestlambdaRR = lambdalist[whichlowestcvRR]; bestlambdaRR
+abline(v=bestlambdaRR)
+
+# LASSO cross-validation
+cvLASSOglm = cv.glmnet(x, y, lambda=lambdalist, alpha = 1, nfolds=ncv, foldid=cvgroups)
+invisible(plot(cvLASSOglm$lambda,cvLASSOglm$cvm,type="l",lwd=2,col="red",xlab="lambda",ylab="CV(10)",
+     xlim=c(0,3),ylim = c(5,8)))
+whichlowestcvLASSO = order(cvLASSOglm$cvm)[1]; min(cvLASSOglm$cvm)
+bestlambdaLASSO = lambdalist[whichlowestcvLASSO]; bestlambdaLASSO
+abline(v=bestlambdaLASSO)
+
+# Elastic Net alpha=0.95 cross-validation
+cvENET95glm = cv.glmnet(x, y, lambda=lambdalist, alpha = 0.95, nfolds=ncv, foldid=cvgroups)
+invisible(plot(cvENET95glm$lambda,cvENET95glm$cvm,type="l",lwd=2,col="red",xlab="lambda",ylab="CV(10)",
+     xlim=c(0,3),ylim = c(5,8)))
+whichlowestcvENET95 = order(cvENET95glm$cvm)[1]; min(cvENET95glm$cvm)
+bestlambdaENET95 = lambdalist[whichlowestcvENET95]; bestlambdaENET95; abline(v=bestlambdaENET95)
+
+# Elastic Net alpha=0.5 cross-validation
+cvENET50glm = cv.glmnet(x, y, lambda=lambdalist, alpha = 0.50, nfolds=ncv, foldid=cvgroups)
+invisible(plot(cvENET50glm$lambda,cvENET50glm$cvm,type="l",lwd=2,col="red",xlab="lambda",ylab="CV(10)",
+     xlim=c(0,3),ylim = c(5,8)))
+whichlowestcvENET50 = order(cvENET50glm$cvm)[1]; min(cvENET50glm$cvm)
+bestlambdaENET50 = lambdalist[whichlowestcvENET50]; bestlambdaENET50; abline(v=bestlambdaENET50)
+
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+
+# fit selected model
+Bestfit = glmnet(x, y, alpha = 0.50,lambda=lambdalist)
+coef(Bestfit,s=bestlambdaENET50)
+plot(Bestfit,xvar="lambda"); abline(v=log(bestlambdaENET50))
+plot(Bestfit)
+
+```
+
+### Bootstrap comparison to confirm reduction in variability of estimates of standard deviations
+
+```{r}
+
+# define functions that output coefficients 
+beta.fn.Full = function(inputdata,index) {
+  yboot = inputdata[index,1]
+  xboot = inputdata[index,-1]
+  lmfitboot = lm(yboot~xboot)
+  return(lmfitboot$coef)
+}
+
+set.seed(5)
+Fullbootoutput = boot(cbind(y,x),beta.fn.Full,R=1000)
+#print(Fullbootoutput)
+
+# best fitting Elastic Net model
+beta.fn.ENET = function(inputdata,index) {
+  yboot = inputdata[index,1]
+  xboot = inputdata[index,-1]
+  ENETfitboot = glmnet(xboot, yboot, alpha = 0.50,lambda=lambdalist)
+  return(coef(ENETfitboot,s=bestlambdaENET50)[,1])
+}
+
+set.seed(5)
+ENETbootoutput = boot(cbind(y,x),beta.fn.ENET,R=1000)
+#print(ENETbootoutput)
+
+# compare variability of coefs
+data.frame(cbind(round(apply(Fullbootoutput$t,2,sd),4),round(apply(ENETbootoutput$t,2,sd),4)),row.names=c("intercept",names(air)))
+
+
+```
+
+There is a slight reduction in variability of estimates of standard deviations. The elastic net models performance is a slight improvement. The lambda tuned validated method of elsatic net with a 0.50 alpha is as follows:
+
+```{r}
+
+BestENfit = glmnet(x, y, alpha = 0.50,lambda=0.3395955)
+coef(BestENfit)
+
+```
+
+### Cross validation for assessment of process with assessment set
+To assess the process
+
+```{r, warning=FALSE, message=FALSE, results='hide'}
+
+n = dim(air)[1]
+
+# specify models to consider
+LinModel1 = (SO2 ~ AMB_TEMP)
+LinModel2 = (SO2 ~ AMB_TEMP+CO)
+LinModel3 = (SO2 ~ AMB_TEMP+CO+PM10+THC)
+LinModel4 = (SO2 ~ AMB_TEMP+CO+PM10+THC+RH)
+LinModel5 = (SO2 ~ AMB_TEMP+CO+PM10+THC+RH+WD_HR)
+LinModel6 = (SO2 ~ AMB_TEMP+CO+PM10+THC+RH+WD_HR+WS_HR)
+allLinModels = list(LinModel1,LinModel2,LinModel3,LinModel4,LinModel5,LinModel6)	
+nLinmodels = length(allLinModels)
+# specifies EN models to consider
+lambdalistRR = c(0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 1, 2)
+nRRmodels = length(lambdalistRR)
+# specifies LASSO models to consider
+lambdalistLASSO = c(0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 1, 2)
+nLASSOmodels = length(lambdalistLASSO)
+
+nmodels = nLinmodels+nRRmodels+nLASSOmodels
+
+################################################################
+##### Validation set assessment of entire modeling process #####				 
+################################################################
+
+##### model assessment outer validation shell #####
+fulldata.out = air
+k.out = 10 
+n.out = dim(fulldata.out)[1]
+
+# set up variables to split at 2/3 for train and 1/3 for valid set
+n.train.out = round(n.out*2/3); n.train.out
+n.valid.out = n.out-n.train.out; n.valid.out
+set.seed(8)
+valid.out = sample(1:n.out,n.valid.out)  
+include.train.out = !is.element(1:n.out,valid.out) 
+include.valid.out = is.element(1:n.out,valid.out)  
+
+# split data from full set 
+#yt = traindata.out$SO2
+traindata.out = air[include.train.out,]
+trainx.out = model.matrix(SO2~.,data=traindata.out)[,-(12)]
+trainy.out = traindata.out$SO2
+validdata.out = air[include.valid.out,]
+yv = validdata.out$SO2
+validx.out = model.matrix(SO2~.,data=validdata.out)[,-(12)]
+validy.out = validdata.out$SO2
+
+  ### entire model-fitting process  ###
+fulldata.in = traindata.out
+
+###########################
+## Full modeling process ##
+###########################
+
+# variables for use inside validation
+n.in = dim(fulldata.in)[1]
+yf = fulldata.in$SO2
+x.in = model.matrix(~.-yf,data=fulldata.in)#[,-(12)]
+y.in = fulldata.in$SO2
+# 10 folds for inner validation selection
+k.in = 10 
+# list of group labels
+groups.in = c(rep(1:k.in,floor(n.in/k.in))); if(floor(n.in/k.in) != (n.in/k.in)) groups.in = c(groups.in, 1:(n.in%%k.in))
+cvgroups.in = sample(groups.in,n.in)  
+# table(cvgroups.in)  # check correct distribution
+allmodelCV.in = rep(NA,nmodels) 
+
+##### cross-validation for model selection ##### 
+
+# storage for predicted values from the CV splits
+allpredictedCV.in = matrix(rep(NA,n.in*nLinmodels),ncol=nLinmodels)
+
+# loop thru folds and store cv value
+for (i in 1:k.in)  {
+  train.in = (cvgroups.in != i)
+  test.in = (cvgroups.in == i)
+  # fit each of the linear regression models on training, and predict the test
+  for (m in 1:nLinmodels) {
+    lmfitCV.in = lm(formula = allLinModels[[m]],data=air,subset=train.in)
+    allpredictedCV.in[test.in,m] = predict.lm(lmfitCV.in,fulldata.in[test.in,])
+  }
+}
+# compute and store the CV(10) values
+for (m in 1:nLinmodels) { 
+  allmodelCV.in[m] = mean((allpredictedCV.in[,m]-fulldata.in$SO2)^2)
+}
+
+##### cross-validation for model selection ##### 
+
+# Elastic net cross-validation
+cvRRglm.in = cv.glmnet(x.in, y.in, lambda=lambdalistRR, alpha = 0.5, nfolds=k.in, foldid=cvgroups.in)
+
+# LASSO cross-validation 
+cvLASSOglm.in = cv.glmnet(x.in, y.in, lambda=lambdalistLASSO, alpha = 1, nfolds=k.in, foldid=cvgroups.in)
+
+# store CV(10) values, in same numeric order as lambda, in storage spots for CV values
+allmodelCV.in[(1:nRRmodels)+nLinmodels] = cvRRglm.in$cvm[order(cvRRglm.in$lambda)]
+# store CV(10) values, in same numeric order as lambda, in storage spots for CV values
+allmodelCV.in[(1:nLASSOmodels)+nRRmodels+nLinmodels] = cvLASSOglm.in$cvm[order(cvLASSOglm.in$lambda)]
+# visualize CV(10) values across all methods
+plot(allmodelCV.in,pch=20, main = "CV(10) Values Across All Models"); abline(v=c(nLinmodels+.5,nLinmodels+nRRmodels+.5))
+
+bestmodel.in = (1:nmodels)[order(allmodelCV.in)[1]]  
+# state which is best model and minimum CV(10) value
+bestmodel.in
+min(allmodelCV.in)
+
+### fit the best model 
+if (bestmodel.in <= nLinmodels) {  
+  bestfit = lm(formula = allLinModels[[bestmodel.in]],data=fulldata.in)  
+  bestcoef = coef(bestfit)
+} else if (bestmodel.in <= nRRmodels+nLinmodels) {  
+  bestlambdaRR = (lambdalistRR)[bestmodel.in-nLinmodels]
+  bestfit = glmnet(x.in, y.in, alpha = 0.5,lambda=lambdalistRR)
+  bestcoef = coef(bestfit, s = bestlambdaRR)
+} else {  
+  bestlambdaLASSO = (lambdalistLASSO)[bestmodel.in-nLinmodels-nRRmodels]
+  bestfit = glmnet(x.in, y.in, alpha = 1,lambda=lambdalistLASSO)  
+  bestcoef = coef(bestfit, s = bestlambdaLASSO) 
+}
+
+#############################
+## End of modeling process ##
+#############################
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+print(paste0("Best Model: ", bestmodel.in))
+# print("Best Model")
+# bestmodel.in
+print(paste0("Minimum CV(10) value: ", allmodelCV.in[7]))
+# print("Minimum CV(10) value")
+# min(allmodelCV.in)
+
+```
+
+
+
+```{r, echo=FALSE,message=FALSE,warning=FALSE}
+  ### resulting in bestmodel.in ###
+# 
+# if (bestmodel.in <= nLinmodels) {
+#   allpredictedvalid.out = predict(bestfit,validdata.out)
+# } else if (bestmodel.in <= nRRmodels+nLinmodels) {
+#   allpredictedvalid.out = predict(bestfit,newx=validdata.out,s=bestlambdaRR)
+# } else {
+#   allpredictedvalid.out = predict(bestfit,newx=validdata.out,s=bestlambdaLASSO)
+# }
+# 
+# plot(allpredictedvalid.out,validy.out)
+# MSE.out = sum((allpredictedvalid.out-validy.out)^2)/n.valid.out; MSE.out
+# R2.out = 1-sum((allpredictedvalid.out-validy.out)^2)/sum((validy.out-mean(validy.out))^2); R2.out
+
+      
+```
+
+#### Result of process assessment:
+
+R2.out = 0.1636816 -> explained about 16.36% of the variability
+
+PS. A lot less typing if I was to use the caret package....
+
+#####################################################################################################
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
